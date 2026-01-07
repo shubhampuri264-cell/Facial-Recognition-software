@@ -1,169 +1,302 @@
 import cv2
 import face_recognition
-import pickle
+import json
+import numpy as np
 import os
 import csv
 import datetime
+import sys
+import threading
+import time
 import tkinter as tk
 from tkinter import ttk, messagebox
-import sys
+from PIL import Image, ImageTk
 
-def initialize_gui():
-    """Initialize the GUI window and components"""
-    root = tk.Tk()
-    root.title("Face Recognition Log")
-    
-    # Create a Treeview to display logs
-    tree = ttk.Treeview(root, columns=("Name", "Date", "Time"), show="headings")
-    tree.heading("Name", text="Name")
-    tree.heading("Date", text="Date")
-    tree.heading("Time", text="Time")
-    tree.pack(fill="both", expand=True)
-    
-    return root, tree
+try:
+    import cv2
+except ImportError:
+    print("❌ Error: 'opencv-python' module is not installed.")
+    sys.exit(1)
 
-def load_encodings():
-    """Load the face encodings from the pickle file"""
-    try:
-        with open("encodings.pickle", "rb") as f:
-            data = pickle.load(f)
-        if "encodings" not in data or "names" not in data:
-            raise ValueError("Missing required keys in encodings file")
-        if len(data["encodings"]) == 0:
-            raise ValueError("No encodings found")
-        return data
-    except FileNotFoundError:
-        raise FileNotFoundError("encodings.pickle not found. Run encode_Face_script.py first.")
-    except Exception as e:
-        raise Exception(f"Error loading encodings: {str(e)}")
+try:
+    import face_recognition
+except ImportError:
+    print("❌ Error: 'face_recognition' module is not installed.")
+    sys.exit(1)
 
-def initialize_camera():
-    """Initialize the camera"""
-    video_capture = cv2.VideoCapture(0)
-    if not video_capture.isOpened():
-        raise Exception("Unable to open camera")
-    return video_capture
+class CameraThread(threading.Thread):
+    def __init__(self, src=0, name="CameraThread"):
+        super().__init__(name=name)
+        self.src = src
+        self.cap = cv2.VideoCapture(self.src)
+        self.grabbed, self.frame = self.cap.read()
+        self.stopped = False
+        self.lock = threading.Lock()
 
-def log_recognition(name, tree, log_file):
-    """Log a recognized face"""
-    now = datetime.datetime.now()
-    date = now.strftime("%Y-%m-%d")
-    time = now.strftime("%H:%M:%S")
-
-    # Write to log file
-    with open(log_file, "a", newline="") as csvfile:
-        csv_writer = csv.writer(csvfile)
-        csv_writer.writerow([name, date, time])
-
-    # Update GUI log
-    tree.insert("", "end", values=(name, date, time))
-    print(f"✅ Recognized {name} at {date} {time}")
-
-def main():
-    # Ensure timestamp directory exists
-    timestamp_dir = os.path.join(os.getcwd(), "timestamp")
-    os.makedirs(timestamp_dir, exist_ok=True)
-    log_file = os.path.join(timestamp_dir, "timestamplog.csv")
-
-    try:
-        # Initialize GUI
-        root, tree = initialize_gui()
-
-        # Load encodings
-        data = load_encodings()
-        
-        # Initialize camera
-        video_capture = initialize_camera()
-        
-        print("✅ Press 'q' to exit")
-
-        # Process every nth frame for efficiency
-        frame_process_interval = 10
-        frame_count = 0
-        recognized_faces = set()
-
-        while True:
-            # Capture frame-by-frame
-            ret, frame = video_capture.read()
-            if not ret:
-                print("❌ Error: Failed to capture video frame")
+    def run(self):
+        while not self.stopped:
+            if not self.cap.isOpened():
                 break
-
-            # Convert the image from BGR color to RGB color
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-            # Only process every nth frame
-            if frame_count % frame_process_interval == 0:
-                # Detect faces in the frame
-                face_locations = face_recognition.face_locations(rgb_frame, model="hog")
-
-                if face_locations:
-                    try:
-                        # Generate encodings for detected faces
-                        face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
-
-                        # Process each detected face
-                        for (top, right, bottom, left), face_encoding in zip(face_locations, face_encodings):
-                            matches = face_recognition.compare_faces(data["encodings"], face_encoding, tolerance=0.6)
-                            name = "Unknown"
-                            rectangle_color = (0, 0, 255)  # Red for unknown
-
-                            if True in matches:
-                                matched_indexes = [i for (i, match) in enumerate(matches) if match]
-                                name_counts = {}
-                                for index in matched_indexes:
-                                    matched_name = data["names"][index]
-                                    name_counts[matched_name] = name_counts.get(matched_name, 0) + 1
-                                
-                                name = max(name_counts, key=name_counts.get)
-                                rectangle_color = (0, 255, 0)  # Green for recognized
-
-                                # Log only if not already logged this session
-                                if name not in recognized_faces:
-                                    recognized_faces.add(name)
-                                    log_recognition(name, tree, log_file)
-
-                            # Draw rectangle and name
-                            cv2.rectangle(frame, (left, top), (right, bottom), rectangle_color, 2)
-                            cv2.rectangle(frame, (left, bottom - 35), (right, bottom), rectangle_color, cv2.FILLED)
-                            cv2.putText(frame, name, (left + 6, bottom - 6),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-
-                    except Exception as e:
-                        print(f"❌ Error processing faces: {e}")
-                        continue
-
-            # Display the frame
-            cv2.imshow('Face Recognition', frame)
             
-            # Update GUI
-            try:
-                root.update()
-            except tk.TclError:
-                break  # Handle case where GUI window is closed
+            # Read the next frame
+            grabbed, frame = self.cap.read()
+            with self.lock:
+                self.grabbed = grabbed
+                self.frame = frame
 
-            frame_count += 1
+    def read(self):
+        with self.lock:
+            return self.grabbed, self.frame
 
-            # Check for 'q' key to quit
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                print("✅ Exiting program")
-                break
+    def stop(self):
+        self.stopped = True
+        self.join()
+        if self.cap.isOpened():
+            self.cap.release()
 
-    except Exception as e:
-        messagebox.showerror("Error", str(e))
-        print(f"❌ Error: {str(e)}")
-        return 1
+class FaceRecognitionApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Facial Recognition System")
+        self.root.geometry("1100x700")
+        
+        # --- State Variables ---
+        self.running = True
+        self.camera_thread = None
+        self.current_frame = None
+        self.latest_scan_result = None
+        self.known_face_encodings = []
+        self.known_face_names = []
+        self.recognized_faces_session = set()
+        
+        # FPS Calculation
+        self.fps_start_time = time.time()
+        self.fps_frame_counter = 0
+        self.fps = 0
+        
+        # Load configuration
+        self.load_encodings()
+        self.setup_logging()
+        
+        # --- GUI Layout ---
+        # Main container
+        main_frame = ttk.Frame(root, padding="10")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Left Panel: Video Feed
+        self.video_panel = ttk.LabelFrame(main_frame, text="Live Camera Feed")
+        self.video_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5)
+        
+        self.video_label = ttk.Label(self.video_panel, text="Starting Camera...")
+        self.video_label.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Right Panel: Controls and Logs
+        right_panel = ttk.Frame(main_frame, width=350)
+        right_panel.pack(side=tk.RIGHT, fill=tk.Y, padx=5)
+        
+        # Control Box
+        control_group = ttk.LabelFrame(right_panel, text="Controls", padding="10")
+        control_group.pack(fill=tk.X, pady=5)
+        
+        # Auto-Scan Toggle
+        self.auto_scan_var = tk.BooleanVar(value=True)
+        self.chk_auto = ttk.Checkbutton(control_group, text="Auto-Scan (Enable)", variable=self.auto_scan_var)
+        self.chk_auto.pack(fill=tk.X, pady=5)
+        
+        # Manual Scan Button
+        self.btn_scan = ttk.Button(control_group, text="📸 Scan Now", command=self.manual_scan)
+        self.btn_scan.pack(fill=tk.X, pady=5)
+        
+        # Quit Button
+        self.btn_quit = ttk.Button(control_group, text="Quit Application", command=self.on_closing)
+        self.btn_quit.pack(fill=tk.X, pady=20)
+        
+        # Log Box
+        log_group = ttk.LabelFrame(right_panel, text="Recognition Log", padding="5")
+        log_group.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        self.tree = ttk.Treeview(log_group, columns=("Name", "Time"), show="headings", height=20)
+        self.tree.heading("Name", text="Name")
+        self.tree.column("Name", width=120)
+        self.tree.heading("Time", text="Time")
+        self.tree.column("Time", width=80)
+        self.tree.pack(fill=tk.BOTH, expand=True)
 
-    finally:
-        # Clean up
+        # Status Bar
+        self.status_var = tk.StringVar(value="Ready")
+        self.status_bar = ttk.Label(root, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
+        self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+
+        # --- Initialization ---
+        self.start_camera()
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+    def load_encodings(self):
         try:
-            video_capture.release()
-            cv2.destroyAllWindows()
-            root.quit()
-        except:
-            pass
+            with open("encodings.json", "r") as f:
+                data = json.load(f)
+            
+            if "encodings" in data:
+                self.known_face_encodings = [np.array(e) for e in data["encodings"]]
+                self.known_face_names = data["names"]
+                print(f"✅ Loaded {len(self.known_face_names)} identities.")
+            else:
+                 messagebox.showwarning("Warning", "No 'encodings' found in JSON.")
+                 self.known_face_names = []
+                 self.known_face_encodings = []
 
-    return 0
+        except FileNotFoundError:
+            messagebox.showerror("Error", "encodings.json not found!\nPlease run encode_Face_script.py first.")
+            self.known_face_names = []
+            self.known_face_encodings = []
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load encodings: {e}")
+
+    def setup_logging(self):
+        # Ensure timestamp directory exists
+        timestamp_dir = os.path.join(os.getcwd(), "timestamp")
+        os.makedirs(timestamp_dir, exist_ok=True)
+        self.log_file = os.path.join(timestamp_dir, "timestamplog.csv")
+
+    def log_recognition(self, name):
+        """Log a recognized face if not recently logged"""
+        if name in self.recognized_faces_session or name == "Unknown":
+            return
+
+        now = datetime.datetime.now()
+        date_str = now.strftime("%Y-%m-%d")
+        time_str = now.strftime("%H:%M:%S")
+
+        # Write to file
+        try:
+            with open(self.log_file, "a", newline="") as csvfile:
+                csv_writer = csv.writer(csvfile)
+                csv_writer.writerow([name, date_str, time_str])
+        except Exception as e:
+            print(f"Logging error: {e}")
+
+        # Update GUI
+        self.tree.insert("", 0, values=(name, time_str)) # Insert at top
+        self.recognized_faces_session.add(name)
+        self.status_var.set(f"Recognized: {name}")
+
+    def start_camera(self):
+        try:
+            self.camera_thread = CameraThread(src=0)
+            self.camera_thread.start()
+            
+            # Start loop
+            self.update_video_feed()
+            
+        except Exception as e:
+            messagebox.showerror("Camera Error", str(e))
+
+    def manual_scan(self):
+        """Force a scan regardless of auto settings"""
+        if self.current_frame is not None:
+             self.status_var.set("Scanning...")
+             # Run in a separate thread to not freeze UI
+             threading.Thread(target=self.process_face_recognition, args=(self.current_frame.copy(),), daemon=True).start()
+
+    def process_face_recognition(self, frame_bgr):
+        """Run face recognition logic (CPU intensive)"""
+        try:
+            # Resize for speed
+            small_frame = cv2.resize(frame_bgr, (0, 0), fx=0.25, fy=0.25)
+            rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
+            
+            # Detect
+            face_locations = face_recognition.face_locations(rgb_small_frame, model="hog")
+            face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations)
+            
+            detected_names = []
+            
+            for face_encoding in face_encodings:
+                matches = face_recognition.compare_faces(self.known_face_encodings, face_encoding, tolerance=0.5)
+                name = "Unknown"
+                
+                if True in matches:
+                    matched_indexes = [i for (i, match) in enumerate(matches) if match]
+                    counts = {}
+                    for i in matched_indexes:
+                        nm = self.known_face_names[i]
+                        counts[nm] = counts.get(nm, 0) + 1
+                    name = max(counts, key=counts.get)
+                
+                detected_names.append(name)
+                self.log_recognition(name)
+            
+            # Store result to be drawn on the main UI thread
+            # Rescale locations back to original size
+            scaled_locations = []
+            for (top, right, bottom, left) in face_locations:
+                scaled_locations.append((top*4, right*4, bottom*4, left*4))
+            
+            self.latest_scan_result = (scaled_locations, detected_names)
+            
+            if not detected_names:
+                self.status_var.set("Scan complete. No known faces found.")
+            
+        except Exception as e:
+            print(f"Recognition Error: {e}")
+
+    def update_video_feed(self):
+        if not self.running:
+            return
+        
+        if self.camera_thread:
+            grabbed, frame = self.camera_thread.read()
+            
+            if grabbed:
+                self.current_frame = frame
+                
+                # FPS Calculation
+                self.fps_frame_counter += 1
+                if time.time() - self.fps_start_time > 1:
+                    self.fps = self.fps_frame_counter / (time.time() - self.fps_start_time)
+                    self.fps_frame_counter = 0
+                    self.fps_start_time = time.time()
+                
+                # Auto-scan logic
+                if not hasattr(self, 'frame_count'): self.frame_count = 0
+                self.frame_count += 1
+                
+                if self.auto_scan_var.get() and self.frame_count % 30 == 0: 
+                     threading.Thread(target=self.process_face_recognition, args=(frame.copy(),), daemon=True).start()
+
+                # Overlay
+                display_frame = frame.copy()
+                
+                if self.latest_scan_result:
+                    locations, names = self.latest_scan_result
+                    for (top, right, bottom, left), name in zip(locations, names):
+                        color = (0, 255, 0) if name != "Unknown" else (0, 0, 255)
+                        cv2.rectangle(display_frame, (left, top), (right, bottom), color, 2)
+                        cv2.rectangle(display_frame, (left, bottom - 35), (right, bottom), color, cv2.FILLED)
+                        cv2.putText(display_frame, name, (left + 6, bottom - 6), cv2.FONT_HERSHEY_DUPLEX, 0.6, (255, 255, 255), 1)
+
+                # Draw FPS
+                cv2.putText(display_frame, f"FPS: {int(self.fps)}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+
+                # Tkinter Update
+                cv2image = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGBA)
+                img = Image.fromarray(cv2image)
+                imgtk = ImageTk.PhotoImage(image=img)
+                
+                self.video_label.imgtk = imgtk 
+                self.video_label.configure(image=imgtk)
+        
+        # 30 FPS target (approx 33ms)
+        self.root.after(30, self.update_video_feed)
+
+    def on_closing(self):
+        self.running = False
+        if self.camera_thread:
+            self.camera_thread.stop()
+        self.root.destroy()
+        sys.exit(0)
 
 if __name__ == "__main__":
-    sys.exit(main())
+    root = tk.Tk()
+    app = FaceRecognitionApp(root)
+    root.mainloop()
